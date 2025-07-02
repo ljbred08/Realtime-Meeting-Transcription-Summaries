@@ -1,350 +1,134 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { io, Socket } from 'socket.io-client'
-import { RecordTranscribe } from '@soniox/speech-to-text-web'
+import { onMounted, onUnmounted, computed } from 'vue';
+import { useSocket } from './composables/useSocket';
+import { useAudio } from './composables/useAudio';
+import { useTranscript } from './composables/useTranscript';
+// All components imported below are referenced in the template. If you remove a component here, make sure to remove its usage in the template as well.
+// All component imports removed unless used in the template below. Add back only if referenced in the template.
+import type { TranscriptEntry } from './types';
 
-interface TranscriptEntry {
-  id: number
-  speaker: string
-  text: string
-  confidence: number
-  timestamp: string
-  is_final: boolean
-}
+// Initialize composables
+const socketComposable = useSocket();
+const audioComposable = useAudio();
+const transcriptComposable = useTranscript();
 
-interface MergedTranscriptEntry {
-  id: string
-  speaker: string
-  text: string
-  confidence: number
-  timestamp: string
-  is_final: boolean
-  chunkCount: number
-}
+const isConnected = socketComposable.isConnected;
+const socketError = socketComposable.error;
+const summary = socketComposable.summary;
+const isGeneratingSummary = socketComposable.isGeneratingSummary;
+const initializeSocket = socketComposable.initializeSocket;
+const generateSummarySocket = socketComposable.generateSummary;
+const disconnect = socketComposable.disconnect;
 
-interface Summary {
-  summary: string
-  wordCount: number
-  speakers: string[]
-  generatedAt: string
-}
+const isRecording = audioComposable.isRecording;
+const audioLevel = audioComposable.audioLevel;
+const startAudioRecording = audioComposable.startRecording;
+const stopAudioRecording = audioComposable.stopRecording;
 
-const socket = ref<Socket | null>(null)
-const isRecording = ref(false)
-const isConnected = ref(false)
-const transcript = ref<TranscriptEntry[]>([])
-const summary = ref<Summary | null>(null)
-const isGeneratingSummary = ref(false)
-const error = ref<string | null>(null)
-const audioLevel = ref(0)
+const transcript = transcriptComposable.transcript;
+const mergedTranscript = transcriptComposable.mergedTranscript;
+const clearTranscript = transcriptComposable.clearTranscript;
+const exportTranscript = transcriptComposable.exportTranscript;
+const addToTranscript = transcriptComposable.addTranscriptEntry;
+const getSpeakerColor = transcriptComposable.getSpeakerColor;
 
-let recordTranscribe: RecordTranscribe | null = null
-let audioContext: AudioContext | null = null
-let analyser: AnalyserNode | null = null
-let animationFrame: number | null = null
+// Use only socketError for error handling
+const error = computed({
+  get: () => socketError.value,
+  set: (val: string | null) => {
+    socketError.value = val;
+  }
+});
 
-const speakerColors = [
-  '#14b8a6', '#f59e0b', '#ef4444', '#8b5cf6', 
-  '#06b6d4', '#84cc16', '#f97316', '#ec4899'
-]
+// Handle transcript updates from audio processing
+const handleTranscript = (entry: TranscriptEntry) => {
+  addToTranscript(entry);
+};
 
-const getSpeakerColor = (speaker: string) => {
-  const index = parseInt(speaker.replace(/\D/g, '')) || 1
-  return speakerColors[(index - 1) % speakerColors.length]
-}
-
-// Computed property to merge adjacent entries from the same speaker
-const mergedTranscript = computed(() => {
-  const merged: MergedTranscriptEntry[] = []
-  
-  for (const entry of transcript.value) {
-    const lastMerged = merged[merged.length - 1]
-    
-    // If this entry is from the same speaker as the last merged entry, merge them
-    if (lastMerged && lastMerged.speaker === entry.speaker) {
-      lastMerged.text += ' ' + entry.text
-      lastMerged.confidence = (lastMerged.confidence + entry.confidence) / 2
-      lastMerged.timestamp = entry.timestamp // Use latest timestamp
-      lastMerged.is_final = lastMerged.is_final && entry.is_final // Only final if all chunks are final
-      lastMerged.chunkCount += 1
-    } else {
-      // Create a new merged entry
-      merged.push({
-        id: `merged-${entry.id}`,
-        speaker: entry.speaker,
-        text: entry.text,
-        confidence: entry.confidence,
-        timestamp: entry.timestamp,
-        is_final: entry.is_final,
-        chunkCount: 1
-      })
-    }
+// Generate summary using socket
+const generateSummary = async () => {
+  if (!transcript.value.length) {
+    error.value = 'No transcript available to generate summary';
+    return;
   }
   
-  return merged
-})
-
-const initializeSocket = () => {
-  socket.value = io('http://localhost:3001')
-  
-  socket.value.on('connect', () => {
-    isConnected.value = true
-    error.value = null
-    console.log('Connected to server')
-  })
-
-  socket.value.on('disconnect', () => {
-    isConnected.value = false
-    console.log('Disconnected from server')
-  })
-
-  socket.value.on('summary-generated', (summaryData: Summary) => {
-    summary.value = summaryData
-    isGeneratingSummary.value = false
-  })
-
-  socket.value.on('summary-error', (errorMsg: string) => {
-    error.value = errorMsg
-    isGeneratingSummary.value = false
-  })
-
-  socket.value.on('error', (errorMsg: string) => {
-    error.value = errorMsg
-    console.error('Socket error:', errorMsg)
-  })
-}
-
-const getAudioLevel = () => {
-  if (!analyser) return
-  
-  const dataArray = new Uint8Array(analyser.frequencyBinCount)
-  analyser.getByteFrequencyData(dataArray)
-  
-  const average = dataArray.reduce((a, b) => a + b) / dataArray.length
-  audioLevel.value = Math.min(average / 128, 1)
-  
-  if (isRecording.value) {
-    animationFrame = requestAnimationFrame(getAudioLevel)
+  try {
+    isGeneratingSummary.value = true;
+    error.value = null;
+    await generateSummarySocket(transcript.value);
+  } catch (err) {
+    error.value = 'Failed to generate summary';
+    console.error('Error generating summary:', err);
+  } finally {
+    isGeneratingSummary.value = false;
   }
-}
+};
 
+// Update startRecording to handle errors and be async
 const startRecording = async () => {
   try {
-    error.value = null
-    
-    // Get microphone access for audio level monitoring
-    const stream = await navigator.mediaDevices.getUserMedia({ 
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        sampleRate: 16000
-      } 
-    })
+    await startAudioRecording(
+      (result: any) => {
+        console.log('Partial result:', result);
+        const speaker = result.speaker ? `Speaker ${result.speaker}` : 'Speaker 1';
 
-    // Set up audio analysis for visual feedback
-    audioContext = new AudioContext()
-    analyser = audioContext.createAnalyser()
-    const source = audioContext.createMediaStreamSource(stream)
-    source.connect(analyser)
-    analyser.fftSize = 256
+        const transcriptEntry: TranscriptEntry = {
+          id: result.id || Date.now() + Math.random(),
+          speaker: speaker,
+          text: result.text,
+          confidence: result.confidence || 0.9,
+          timestamp: new Date().toISOString(),
+          is_final: false
+        };
 
-    // Initialize Soniox RecordTranscribe
-    recordTranscribe = new RecordTranscribe({
-      apiKey: import.meta.env.VITE_SONIOX_API_KEY,
-    })
+        // Update or add partial result
+        const existingIndex = transcript.value.findIndex((t: TranscriptEntry) => t.id === transcriptEntry.id);
 
-    // Clear previous transcript
-    transcript.value = []
-    
-    // Start transcription
-    await recordTranscribe.start({
-      model: 'stt-rt-preview',
-      enableSpeakerDiarization: true,
-      onStarted: () => {
-        console.log('Soniox transcription started')
-        isRecording.value = true
-        getAudioLevel()
-      },
-      onPartialResult: (result: any) => {
-        console.log('Partial result:', result)
-        var text = "";
-          for (const token of result.tokens) {
-            if (token.is_final) {
-              text += token.text;
-            } else {
-             // newNonFinalTokens += token.text;
-            }
-          }
-        if (text.length > 0) {
-          const speaker = result.speaker ? `Speaker ${result.speaker}` : 'Speaker 1'
-          
-          const transcriptEntry: TranscriptEntry = {
-            id: result.id || Date.now() + Math.random(),
-            speaker: speaker,
-            text: text,
-            confidence: result.confidence || 0.9,
-            timestamp: new Date().toISOString(),
-            is_final: false
-          }
-          
-          // Update or add partial result
-          const existingIndex = transcript.value.findIndex(t => t.id === transcriptEntry.id)
-          
-          if (existingIndex >= 0) {
-            transcript.value[existingIndex] = transcriptEntry
-          } else {
-            transcript.value.push(transcriptEntry)
-          }
-          
-          // Auto-scroll to bottom
-          setTimeout(() => {
-            const container = document.getElementById('transcript-container')
-            if (container) {
-              container.scrollTop = container.scrollHeight
-            }
-          }, 100)
+        if (existingIndex >= 0) {
+          transcript.value[existingIndex] = transcriptEntry;
+        } else {
+          transcript.value.push(transcriptEntry);
         }
-      },
-      onFinalResult: (result: any) => {
-        console.log('Final result:', result)
-        if (result.words && result.words.length > 0) {
-          const text = result.words.map((w: any) => w.text).join(' ')
-          const speaker = result.speaker ? `Speaker ${result.speaker}` : 'Speaker 1'
-          
-          const transcriptEntry: TranscriptEntry = {
-            id: result.id || Date.now() + Math.random(),
-            speaker: speaker,
-            text: text,
-            confidence: result.confidence || 0.9,
-            timestamp: new Date().toISOString(),
-            is_final: true
-          }
-          
-          // Replace any partial result with final result
-          const existingIndex = transcript.value.findIndex(t => t.id === transcriptEntry.id)
-          
-          if (existingIndex >= 0) {
-            transcript.value[existingIndex] = transcriptEntry
-          } else {
-            transcript.value.push(transcriptEntry)
-          }
-          
-          // Auto-scroll to bottom
-          setTimeout(() => {
-            const container = document.getElementById('transcript-container')
-            if (container) {
-              container.scrollTop = container.scrollHeight
-            }
-          }, 100)
-        }
-      },
-      onError: (status: any, message: string) => {
-        console.error('Soniox error:', status, message)
-        error.value = `Transcription error: ${message}`
-        isRecording.value = false
-      },
-      onFinished: () => {
-        console.log('Soniox transcription finished')
-        isRecording.value = false
-        audioLevel.value = 0
-        if (animationFrame) {
-          cancelAnimationFrame(animationFrame)
-        }
-      }
-    })
 
+        // Auto-scroll to bottom
+        setTimeout(() => {
+          const container = document.getElementById('transcript-container');
+          if (container) {
+            container.scrollTop = container.scrollHeight;
+          }
+        }, 100);
+      }, // onPartialResult
+      handleTranscript // onFinalResult
+    );
   } catch (err) {
-    console.error('Error starting recording:', err)
-    error.value = 'Failed to start transcription. Please check your API key and microphone permissions.'
-    isRecording.value = false
+    error.value = err instanceof Error ? err.message : 'An unknown error occurred';
   }
-}
+};
 
-const stopRecording = () => {
-  if (recordTranscribe) {
-    recordTranscribe.stop()
-  }
-  
-  if (audioContext) {
-    audioContext.close()
-  }
-  
-  if (animationFrame) {
-    cancelAnimationFrame(animationFrame)
-  }
-  
-  isRecording.value = false
-  audioLevel.value = 0
-}
-
-const generateSummary = () => {
-  if (!transcript.value.length) {
-    error.value = 'No transcript available for summary'
-    return
-  }
-  
-  isGeneratingSummary.value = true
-  error.value = null
-  
-  // Send merged transcript to server for summary generation
-  const finalTranscript = mergedTranscript.value
-    .filter(entry => entry.is_final)
-    .map(entry => ({ speaker: entry.speaker, text: entry.text }))
-  
-  socket.value?.emit('generate-summary', finalTranscript)
-}
-
-const clearTranscript = () => {
-  transcript.value = []
-  summary.value = null
-  error.value = null
-}
-
-const exportTranscript = () => {
-  const finalTranscript = mergedTranscript.value
-    .filter(entry => entry.is_final)
-    .map(entry => `[${new Date(entry.timestamp).toLocaleTimeString()}] ${entry.speaker}: ${entry.text}`)
-    .join('\n')
-  
-  const blob = new Blob([finalTranscript], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `transcript-${new Date().toISOString().slice(0, 10)}.txt`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
+// Export summary function for the template
 const exportSummary = () => {
-  if (!summary.value) return
+  if (!summary.value) return;
   
-  const summaryText = `Meeting Summary
-Generated: ${new Date(summary.value.generatedAt).toLocaleString()}
-Speakers: ${summary.value.speakers.join(', ')}
-Word Count: ${summary.value.wordCount}
+  const blob = new Blob([summary.value.text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `summary-${new Date().toISOString().slice(0, 10)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
 
-${summary.value.summary}`
-  
-  const blob = new Blob([summaryText], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `summary-${new Date().toISOString().slice(0, 10)}.txt`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
+// Initialize socket connection when component mounts
 onMounted(() => {
-  initializeSocket()
-})
+  initializeSocket();
+});
 
+// Clean up on component unmount
 onUnmounted(() => {
-  if (isRecording.value) {
-    stopRecording()
-  }
-  socket.value?.disconnect()
-})
+  disconnect();
+});
 </script>
 
 <template>
@@ -400,7 +184,7 @@ onUnmounted(() => {
           
           <div class="flex items-center space-x-6">
             <button
-              @click="isRecording ? stopRecording() : startRecording()"
+              @click="isRecording ? stopAudioRecording() : startRecording()"
               :disabled="!isConnected"
               :class="[
                 'flex items-center justify-center w-16 h-16 rounded-full transition-all transform hover:scale-105',
