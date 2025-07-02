@@ -78,7 +78,7 @@ const startRecording = async () => {
           text: result.text,
           confidence: result.confidence || 0.9,
           timestamp: new Date().toISOString(),
-          is_final: false
+          is_final: true
         };
 
         // Update or add partial result
