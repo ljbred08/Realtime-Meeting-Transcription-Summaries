@@ -63,25 +63,85 @@ export function useAudio() {
           getAudioLevel()
         },
         onPartialResult: (result: any) => {
-          let text = ""
+          if (!result.tokens || result.tokens.length === 0) return;
+
+          // Group contiguous tokens by speaker
+          let chunks: { speaker: any, text: string, tokens: any[] }[] = [];
+          let currentSpeaker = result.tokens[0].speaker;
+          let currentTokens: any[] = [];
+
           for (const token of result.tokens) {
-            if (token.is_final) {
-              text += token.text
+            if (token.speaker !== currentSpeaker) {
+              chunks.push({
+                speaker: currentSpeaker,
+                text: currentTokens.filter((t: any) => t.is_final).map((t: any) => t.text).join(''),
+                tokens: currentTokens
+              });
+              currentSpeaker = token.speaker;
+              currentTokens = [];
             }
+            currentTokens.push(token);
           }
-          if (text.length > 0) {
-            onPartialResult({
-              ...result,
-              text: text
-            })
+          // Push the last chunk
+          if (currentTokens.length > 0) {
+            chunks.push({
+              speaker: currentSpeaker,
+              text: currentTokens.filter((t: any) => t.is_final).map((t: any) => t.text).join(''),
+              tokens: currentTokens
+            });
+          }
+
+          // Emit a partial result for each chunk with non-empty text
+          for (const chunk of chunks) {
+            if (chunk.text.length > 0) {
+              onPartialResult({
+                ...result,
+                text: chunk.text,
+                speaker: chunk.speaker,
+                tokens: chunk.tokens
+              });
+            }
           }
         },
         onFinalResult: (result: any) => {
-          if (result.words && result.words.length > 0) {
-            onFinalResult({
-              ...result,
-              text: result.words.map((w: any) => w.text).join(' ')
-            })
+          if (!result.tokens || result.tokens.length === 0) return;
+
+          // Group contiguous tokens by speaker
+          let chunks: { speaker: any, text: string, tokens: any[] }[] = [];
+          let currentSpeaker = result.tokens[0].speaker;
+          let currentTokens: any[] = [];
+
+          for (const token of result.tokens) {
+            if (token.speaker !== currentSpeaker) {
+              chunks.push({
+                speaker: currentSpeaker,
+                text: currentTokens.filter((t: any) => t.is_final).map((t: any) => t.text).join(''),
+                tokens: currentTokens
+              });
+              currentSpeaker = token.speaker;
+              currentTokens = [];
+            }
+            currentTokens.push(token);
+          }
+          // Push the last chunk
+          if (currentTokens.length > 0) {
+            chunks.push({
+              speaker: currentSpeaker,
+              text: currentTokens.filter((t: any) => t.is_final).map((t: any) => t.text).join(''),
+              tokens: currentTokens
+            });
+          }
+
+          // Emit a final result for each chunk with non-empty text
+          for (const chunk of chunks) {
+            if (chunk.text.length > 0) {
+              onFinalResult({
+                ...result,
+                text: chunk.text,
+                speaker: chunk.speaker,
+                tokens: chunk.tokens
+              });
+            }
           }
         },
         onError: (status: any, message: string) => {
